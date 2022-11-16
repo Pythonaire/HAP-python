@@ -3,6 +3,7 @@
 
 import json
 from unittest.mock import patch
+from urllib.parse import urlparse
 from uuid import UUID
 
 import pytest
@@ -70,7 +71,7 @@ def test_list_pairings(driver):
 
     assert tlv_objects == {
         hap_handler.HAP_TLV_TAGS.SEQUENCE_NUM: hap_handler.HAP_TLV_STATES.M2,
-        hap_handler.HAP_TLV_TAGS.USERNAME: str(CLIENT_UUID).encode("utf8"),
+        hap_handler.HAP_TLV_TAGS.USERNAME: str(CLIENT_UUID).encode("utf8").upper(),
         hap_handler.HAP_TLV_TAGS.PUBLIC_KEY: PUBLIC_KEY,
         hap_handler.HAP_TLV_TAGS.PERMISSIONS: hap_handler.HAP_PERMISSIONS.ADMIN,
     }
@@ -697,6 +698,8 @@ def test_handle_get_characteristics_encrypted(driver):
     response = hap_handler.HAPResponse()
     handler.response = response
     handler.path = "/characteristics?id=1.11"
+    handler.parsed_url = urlparse(handler.path)
+
     handler.handle_get_characteristics()
 
     assert response.status_code == 200

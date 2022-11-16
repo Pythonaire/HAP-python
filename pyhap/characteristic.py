@@ -5,9 +5,7 @@ A Characteristic is the smallest unit of the smart home, e.g.
 a temperature measuring or a device status.
 """
 import logging
-
 from uuid import UUID
-
 
 from pyhap.const import (
     HAP_PERMISSION_READ,
@@ -82,7 +80,7 @@ PROP_PERMISSIONS = "Permissions"
 PROP_UNIT = "unit"
 PROP_VALID_VALUES = "ValidValues"
 
-PROP_NUMERIC = (PROP_MAX_VALUE, PROP_MIN_VALUE, PROP_MIN_STEP, PROP_UNIT)
+PROP_NUMERIC = {PROP_MAX_VALUE, PROP_MIN_VALUE, PROP_MIN_STEP, PROP_UNIT}
 
 CHAR_BUTTON_EVENT = UUID("00000126-0000-1000-8000-0026BB765291")
 CHAR_PROGRAMMABLE_SWITCH_EVENT = UUID("00000073-0000-1000-8000-0026BB765291")
@@ -133,10 +131,16 @@ class Characteristic:
         "_uuid_str",
         "_loader_display_name",
         "allow_invalid_client_values",
+        "unique_id",
     )
 
     def __init__(
-        self, display_name, type_id, properties, allow_invalid_client_values=False
+        self,
+        display_name,
+        type_id,
+        properties,
+        allow_invalid_client_values=False,
+        unique_id=None,
     ):
         """Initialise with the given properties.
 
@@ -169,12 +173,16 @@ class Characteristic:
         self.getter_callback = None
         self.setter_callback = None
         self.service = None
+        self.unique_id = unique_id
         self._uuid_str = uuid_to_hap_type(type_id)
         self._loader_display_name = None
 
     def __repr__(self):
         """Return the representation of the characteristic."""
-        return f"<characteristic display_name={self.display_name} value={self.value} properties={self.properties}>"
+        return (
+            f"<characteristic display_name={self.display_name} unique_id={self.unique_id} "
+            f"value={self.value} properties={self.properties}>"
+        )
 
     def _get_default_value(self):
         """Return default value for format."""
@@ -358,7 +366,10 @@ class Characteristic:
         value = self.get_value()
         if self.properties[PROP_FORMAT] in HAP_FORMAT_NUMERICS:
             hap_rep.update(
-                {k: self.properties[k] for k in self.properties.keys() & PROP_NUMERIC}
+                {
+                    k: self.properties[k]
+                    for k in PROP_NUMERIC.intersection(self.properties)
+                }
             )
 
             if PROP_VALID_VALUES in self.properties:

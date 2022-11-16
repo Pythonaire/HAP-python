@@ -4,7 +4,6 @@ The HAPServerHandler manages the state of the connection and handles incoming re
 """
 import asyncio
 from http import HTTPStatus
-import json
 import logging
 from urllib.parse import parse_qs, urlparse
 import uuid
@@ -12,9 +11,10 @@ import uuid
 from cryptography.exceptions import InvalidSignature, InvalidTag
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from chacha20poly1305_reuseable import ChaCha20Poly1305Reusable as ChaCha20Poly1305
 
 from pyhap import tlv
+
 from pyhap.const import (
     CATEGORY_BRIDGE,
     HAP_PERMISSIONS,
@@ -25,7 +25,7 @@ from pyhap.const import (
 from pyhap.util import long_to_bytes
 
 from .hap_crypto import hap_hkdf, pad_tls_nonce
-from .util import to_hap_json
+from .util import to_hap_json, from_hap_json
 
 # iOS will terminate the connection if it does not respond within
 # 10 seconds, so we only allow 9 seconds to avoid this.
@@ -145,6 +145,7 @@ class HAPServerHandler:
         self.command = None
         self.headers = None
         self.request_body = None
+        self.parsed_url = None
 
         self.response = None
 
@@ -199,6 +200,7 @@ class HAPServerHandler:
         self.command = request.method.decode()
         self.headers = {k.decode(): v.decode() for k, v in request.headers}
         self.request_body = body
+        self.parsed_url = urlparse(self.path)
         response = HAPResponse()
         self.response = response
 
@@ -210,7 +212,7 @@ class HAPServerHandler:
             self.headers,
         )
 
-        path = urlparse(self.path).path
+        path = self.parsed_url.path
         try:
             getattr(self, self.HANDLERS[self.command][path])()
         except UnprivilegedRequestException:
@@ -415,7 +417,11 @@ class HAPServerHandler:
         cipher = ChaCha20Poly1305(encryption_key)
         aead_message = bytes(cipher.encrypt(self.PAIRING_5_NONCE, bytes(message), b""))
 
-        client_uuid = uuid.UUID(str(client_username, "utf-8"))
+        client_username_str = str(client_username, "utf-8")
+        client_uuid = uuid.UUID(client_username_str)
+        logger.debug(
+            "Finishing pairing with admin %s uuid=%s", client_username_str, client_uuid
+        )
         should_confirm = self.accessory_handler.pair(
             client_uuid, client_ltpk, HAP_PERMISSIONS.ADMIN
         )
@@ -584,7 +590,7 @@ class HAPServerHandler:
             raise UnprivilegedRequestException
 
         # Check that char exists and ...
-        params = parse_qs(urlparse(self.path).query)
+        params = parse_qs(self.parsed_url.query)
         response = self.accessory_handler.get_characteristics(
             params["id"][0].split(",")
         )
@@ -612,7 +618,7 @@ class HAPServerHandler:
             self.send_response(HTTPStatus.UNAUTHORIZED)
             return
 
-        requested_chars = json.loads(self.request_body.decode("utf-8"))
+        requested_chars = from_hap_json(self.request_body.decode("utf-8"))
         logger.debug(
             "%s: Set characteristics content: %s", self.client_address, requested_chars
         )
@@ -637,7 +643,7 @@ class HAPServerHandler:
             self.send_response(HTTPStatus.UNAUTHORIZED)
             return
 
-        request = json.loads(self.request_body.decode("utf-8"))
+        request = from_hap_json(self.request_body.decode("utf-8"))
         logger.debug("%s: prepare content: %s", self.client_address, request)
 
         response = self.accessory_handler.prepare(request, self.client_address)
@@ -667,11 +673,18 @@ class HAPServerHandler:
 
     def _handle_add_pairing(self, tlv_objects):
         """Update client information."""
-        logger.debug("%s: Adding client pairing.", self.client_address)
         client_username = tlv_objects[HAP_TLV_TAGS.USERNAME]
+        client_username_str = str(client_username, "utf-8")
         client_public = tlv_objects[HAP_TLV_TAGS.PUBLIC_KEY]
         permissions = tlv_objects[HAP_TLV_TAGS.PERMISSIONS]
-        client_uuid = uuid.UUID(str(client_username, "utf-8"))
+        client_uuid = uuid.UUID(client_username_str)
+        logger.debug(
+            "%s: Adding client pairing for %s uuid=%s with permissions %s.",
+            self.client_address,
+            client_username_str,
+            client_uuid,
+            permissions,
+        )
         should_confirm = self.accessory_handler.pair(
             client_uuid, client_public, permissions
         )
@@ -684,10 +697,17 @@ class HAPServerHandler:
 
     def _handle_remove_pairing(self, tlv_objects):
         """Remove pairing with the client."""
-        logger.debug("%s: Removing client pairing.", self.client_address)
         client_username = tlv_objects[HAP_TLV_TAGS.USERNAME]
-        client_uuid = uuid.UUID(str(client_username, "utf-8"))
+        client_username_str = str(client_username, "utf-8")
+        client_uuid = uuid.UUID(client_username_str)
         was_paired = self.state.paired
+        logger.debug(
+            "%s: Removing client pairing (%s) uuid=%s (was previously paired=%s).",
+            self.client_address,
+            client_username_str,
+            client_uuid,
+            was_paired,
+        )
         # If the client does not exist, we must
         # respond with success per the spec
         if client_uuid in self.state.paired_clients:
@@ -712,7 +732,10 @@ class HAPServerHandler:
             response.extend(
                 [
                     HAP_TLV_TAGS.USERNAME,
-                    str(client_uuid).encode("utf-8"),
+                    # iOS 16+ requires the username to be uppercase
+                    # or it will unpair the accessory because it thinks
+                    # the username is invalid
+                    str(client_uuid).encode("utf-8").upper(),
                     HAP_TLV_TAGS.PUBLIC_KEY,
                     client_public,
                     HAP_TLV_TAGS.PERMISSIONS,
@@ -742,7 +765,7 @@ class HAPServerHandler:
 
     def handle_resource(self):
         """Get a snapshot from the camera."""
-        data = json.loads(self.request_body.decode("utf-8"))
+        data = from_hap_json(self.request_body.decode("utf-8"))
 
         if self.accessory_handler.accessory.category == CATEGORY_BRIDGE:
             accessory = self.accessory_handler.accessory.accessories.get(data["aid"])
